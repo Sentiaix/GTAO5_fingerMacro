@@ -1,4 +1,4 @@
-# GTA5 Cayo Perico Hacker
+# GTA5 Casino Heist Hacker
 
 GTA5 지문 해킹을 자동화하는 파이썬 매크로입니다.
 
