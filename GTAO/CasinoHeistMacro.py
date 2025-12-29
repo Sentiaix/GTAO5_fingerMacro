@@ -4,80 +4,76 @@ import numpy as np
 import time
 import pydirectinput
 import pyautogui
+from PIL import ImageGrab
 import keyboard
 import winsound
 import sys
 
-'''
-================================================================================
-[ GTA5 Cayo Perico Fingerprint Hacker - Optimized Version ]
+# -- memo -- #
+#
+# argument랑 LLM해서 하는게 더 빠르고 정확할 것 같은데
+# 처음이라 많은 시도를 하기도 힘들고 이미 많이 짜버림
+#
+# mss 사용하려 했으나 이미지 인식에 있어선 가우시안 블러가 더 정확함.
+# 다양한 해상도에도 적용하기 위해 이미지의 크기 resize,
+# 동적 해상도에 따른 비율계산 로직 추가
+# F6키를 눌렀을때 프로그램을 재시작 하는 기능 추가. (큰 의미 없어보임)
 
-1. 주요 기능:
-   - F4: 프로그램 즉시 종료 (EXIT)
-   - F5: 지문 분석 및 해킹 자동 실행 (START)
-   - F7: 시스템 상태 확인 부저음 (CHECK)
 
-2. 최적화 및 수정 사항:
-   - [입력 최적화] pydirectinput.PAUSE를 0.01로 단축하여 키 입력 속도 극대화.
-   - [딜레이 제어] 각 파츠 선택 사이 이동 대기 0.02초, 최종 Tab 입력 전 0.1초 대기 적용.
-   - [정밀도 향상] Gaussian Blur와 Adaptive Threshold를 결합한 고정밀 지문 패턴 분석.
-   - [사용성 개선] 
-     * 프로그램 실행 시 시작 알림음 (0.1초 간격 2회 비프음).
-     * F7 키 입력 시 시스템 활성화 확인용 단일 비프음.
-     * 모든 디버그 로그 및 실행 로그 제거 (Clean Console UI).
-   - [배포 최적화] PyInstaller 빌드 시 이미지 리소스 포함을 위한 resource_path 로직 적용.
-
-3. 실행 주의사항:
-   - 게임 엔진 내 키 입력 전달을 위해 반드시 '관리자 권한'으로 실행해야 함.
-   - 1920x1080 해상도 및 표준 UI 크기에 최적화됨.
-================================================================================
-'''
-
-# 1. 리소스 경로 해결 함수
 def resource_path(relative_path):
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
 
-# 2. 초기 설정
+# 1. 전역 설정 및 해상도 비율 계산
 pydirectinput.PAUSE = 0.01
 
-FINGER_MAP = {
-    'big_finger1.png': [f'part_1_{i}.png' for i in range(1, 5)],
-    'big_finger2.png': [f'part_2_{i}.png' for i in range(1, 5)],
-    'big_finger3.png': [f'part_3_{i}.png' for i in range(1, 5)],
-    'big_finger4.png': [f'part_4_1.png', 'part_4_2.png', 'part_4_3.png', 'part_4_4.png']
-}
+# 현재 해상도 감지
+SCREEN_W, SCREEN_H = pyautogui.size()
+# 1920x1080(기준) 대비 현재 해상도 비율
+RATIO_W = SCREEN_W / 1920
+RATIO_H = SCREEN_H / 1080
+# 이미지 리사이징 배율 (가로세로 비율 중 작은 쪽을 기준으로 왜곡 방지)
+IMG_SCALE = min(RATIO_W, RATIO_H)
 
-BLACKLIST_MAP = {
-    'big_finger1.png': 'b1.png',
-    'big_finger2.png': 'b2.png',
-    'big_finger3.png': 'b3.png',
-    'big_finger4.png': 'b4.png'
-}
+FINGER_MAP = {f'big_finger{i}.png': [f'part_{i}_{j}.png' for j in range(1, 5)] for i in range(1, 5)}
+BLACKLIST_MAP = {f'big_finger{i}.png': f'b{i}.png' for i in range(1, 5)}
 
-X_COORDS = [473, 617]
-Y_BASES = [269, 412, 555, 698]
-Y_OFFSETS = [0, 1, 2, 3]
+# 2. 유동적 좌표 계산 함수 (PIL bbox 형식: left, top, right, bottom)
+def get_rel_pos_bbox(x, y, w, h):
+    return (
+        int(x * RATIO_W), 
+        int(y * RATIO_H), 
+        int((x + w) * RATIO_W), 
+        int((y + h) * RATIO_H)
+    )
 
-def get_precision_score(target_filename, region):
-    """ 기존 가우시안 블러 + 적응형 이진화 방식 """
+# 동적 영역 설정
+BIG_REGION_BBOX = get_rel_pos_bbox(960, 160, 360, 520)
+X_COORDS = [int(473 * RATIO_W), int(617 * RATIO_W)]
+Y_BASES = [int(269 * RATIO_H), int(412 * RATIO_H), int(555 * RATIO_H), int(698 * RATIO_H)]
+PART_SIZE_PX = int(122 * IMG_SCALE)
+
+# --- [안정적인 분석 함수] PIL 기반 ---
+def get_precision_score(target_filename, region_bbox):
     try:
-        left, top, w, h = region
-        screenshot = pyautogui.screenshot(region=(left, top, w, h))
+        # ImageGrab 방식
+        screenshot = ImageGrab.grab(bbox=region_bbox)
         img_gray = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2GRAY)
         
         path = resource_path(target_filename)
         template_gray = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         if template_gray is None: return 0.0
 
-        # 고정밀 가우시안 처리
+        # [리사이징] 현재 해상도에 맞춰 지문 템플릿 크기 조절
+        if IMG_SCALE != 1.0:
+            new_size = (int(template_gray.shape[1] * IMG_SCALE), int(template_gray.shape[0] * IMG_SCALE))
+            template_gray = cv2.resize(template_gray, new_size, interpolation=cv2.INTER_LANCZOS4)
+
+        # 가우시안 블러 및 이진화 (기존 방식 유지)
         img_blur = cv2.GaussianBlur(img_gray, (3, 3), 0)
         temp_blur = cv2.GaussianBlur(template_gray, (3, 3), 0)
 
-        # 적응형 이진화
         img_bin = cv2.adaptiveThreshold(img_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                         cv2.THRESH_BINARY, 11, 2)
         temp_bin = cv2.adaptiveThreshold(temp_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
@@ -85,25 +81,29 @@ def get_precision_score(target_filename, region):
 
         res = cv2.matchTemplate(img_bin, temp_bin, cv2.TM_CCOEFF_NORMED)
         return cv2.minMaxLoc(res)[1]
-    except:
+    except Exception:
         return 0.0
 
-# --- 기능 함수 ---
-
+# F4 키 할당 함수
 def exit_program():
-    """ F4: 즉시 종료 """
     winsound.Beep(500, 300)
     os._exit(0)
 
+# F6 키 할당 함수
+def restart_program():
+    """프로그램 재시작"""
+    winsound.Beep(800, 100)
+    # 현재 실행 경로를 찾아 새 프로세스로 교체
+    python = sys.executable
+    os.execl(python, python, *sys.argv)
+
 def run_hack():
-    """ F5: 해킹 실행 """
-    # 1. 중앙 지문 인식
-    big_region = (960, 160, 360, 520)
     selected_key = None
     best_big_score = 0.0
     
+    # 1. 중앙 지문 인식
     for big_img in FINGER_MAP.keys():
-        score = get_precision_score(big_img, big_region)
+        score = get_precision_score(big_img, BIG_REGION_BBOX)
         if score > best_big_score:
             best_big_score = score
             selected_key = big_img
@@ -118,11 +118,11 @@ def run_hack():
     cell_idx = 1
     
     for row in range(4):
-        y = Y_BASES[row] + Y_OFFSETS[row]
+        y = Y_BASES[row]
         for x in X_COORDS:
-            region = (x, y, 122, 122)
-            # 함정 확인 (정밀도 0.92 기준)
-            if get_precision_score(trap_img, region) >= 0.92:
+            # 파츠별 bbox 설정
+            region = (x, y, x + PART_SIZE_PX, y + PART_SIZE_PX)
+            if get_precision_score(trap_img, region) >= 0.90:
                 score = -2.0
             else:
                 score = max([get_precision_score(p, region) for p in answer_parts])
@@ -130,7 +130,7 @@ def run_hack():
             final_results.append({'id': cell_idx, 'score': score})
             cell_idx += 1
 
-    # 3. 입력 로직
+    # 3. 입력 실행
     top_4 = sorted(final_results, key=lambda x: x['score'], reverse=True)[:4]
     target_ids = {item['id'] for item in top_4}
     
@@ -141,30 +141,34 @@ def run_hack():
             pydirectinput.press('right')
             time.sleep(0.02)
             
-    time.sleep(0.1) # 마지막 Tab 전 0.1초 대기
+    time.sleep(0.1)
     pydirectinput.press('tab')
 
 def play_buzzer():
-    """ F7: 상태 확인 (삐- 1번) """
     winsound.Beep(1000, 100)
 
-# --- 메인 루틴 ---
-
 if __name__ == "__main__":
-    # 실행 시 시작음 (삐-삐-)
     winsound.Beep(1000, 100)
     time.sleep(0.1)
     winsound.Beep(1000, 100)
 
-    # 안내 표 (최소한의 안내만 제공)
-    print("========================================")
-    print(" F4: EXIT | F5: START | F7: CHECK ")
-    print(" 사용방법: 지문이 보이면 F5를 누른 후 대기.")
-    print(" 만약 실행되지 않는다면 관리자 권한으로 재실행")
-    print("========================================")
+    print("==================================================")
+    print("            GTA 5 Casino Heist Macro ")
+    print(f" 감지된 해상도: {SCREEN_W} x {SCREEN_H} (비율: {IMG_SCALE:.2f})")
+    print("--------------------------------------------------")
+    print(" F4: 종료 | F5: 실행 | F6: 재시작 | F7: 상태 확인 ")
+    print("--------------------------------------------------")
+    print(" 정확도가 낮다면, 1920 x 1080 해상도로 바꾼 뒤 ")
+    print(" 게임 창을 가장 좌상단에 위치시켜 사용해보세요. ")
+    print(" * 창 모드 또는 전체 창 모드를 추천합니다. ")
+    print("--------------------------------------------------")
+    print(" 빌드 및 원본 파일, 자세한 설명서는 아래를 참고")
+    print(" https://github.com/Sentiaix/GTAO5_fingerMacro")
+    print("==================================================")
 
     keyboard.add_hotkey('f4', exit_program)
     keyboard.add_hotkey('f5', run_hack)
+    keyboard.add_hotkey('f6', restart_program)
     keyboard.add_hotkey('f7', play_buzzer)
 
     while True:
